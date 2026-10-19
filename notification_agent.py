@@ -1,5 +1,6 @@
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
+from langchain.messages import SystemMessage,HumanMessage
 from tools.notification_tool import send_notification
 from database.notification_state import(
     create_database,get_state,save_state,reset_state
@@ -10,43 +11,27 @@ MAX_NOTIFICATIONS=3
 
 
 model=init_chat_model(model="ollama:qwen3:4b")
+SYSTEM_PROMPT = """
+You are a notification-writing assistant for an
+industrial predictive maintenance system.
 
-agent=create_agent(model=model,tools=[send_notification],
-                system_prompt="""
-You are a notification agent for a industrial predictive maintenance system.
+Write a short, clear maintenance notification using
+only the information provided by Python.
 
-Your job is to notify maintenance perrsonnel when a machine requires attention.
-
-There are three severity levvels:
-
-NORMAL:
-No failure i spredicted and no anomaly is detedcted.
-Do not send a notification.
-
-
-WARNING:
-An anomaly is detected but no failure is predicted.
-Send a critical notification.
-
-CRITICAL:
-A machine failure is predicted.
-Send a critical notification.
-
-Use the send_notification tool to send the Windows desktop notification.
-
-Keep notification short and clear.
-
-Always include:
+Include:
 - Machine ID
 - Severity
-- Relevant  failure type if available
-- Recommended action
+- Failure type, if available
+- Failure probability, if available
+- Recommended maintenance action
 
-Do not invent sensor valuess or predictions results.
+Do not invent sensor values or predictions.
 
-Use only the information provided to you.
+Return only the notification message.
+Do not attempt to call tools or claim that a
+notification has already been sent.
 """
-)
+
 
 
 
@@ -70,8 +55,12 @@ def process_machine_event(machine_id,prediction_result,anomaly_result):
 
     if predicted_failures:
         severity="CRITICAL"
-        failure_type=predicted_failures[0]
 
+        failure_type=max(predicted_failures,
+                        key=lambda name: prediction_result[name].get(
+                            "probability",0
+                        )
+                    )
     elif anomaly:
         severity="WARNING"
         failure_type=None
@@ -91,23 +80,18 @@ def process_machine_event(machine_id,prediction_result,anomaly_result):
 
     previous_state=get_state(machine_id)
 
-    new_event=False
-
     if previous_state is None:
-        new_event=True
-
         notification_count=0
     else:
         notification_count=previous_state["notification_count"]
 
-        if(previous_state['severity']=="WARNING" and severity=="CRITICAL"):
-            new_event=True
-        elif(severity=="CRITICAL" and previous_state['failure_type']!=failure_type):
-            new_event=True
-        else:
-            new_event=False
-    if new_event:
-        notification_count=0
+        condition_changed=(
+            previous_state["severity"]!=severity
+            or previous_state["failure_type"]!=failure_type
+        )
+
+        if condition_changed:
+            notification_count=0
 
     if notification_count>=MAX_NOTIFICATIONS:
         return {
@@ -143,10 +127,13 @@ Anomaly detected:
 Anomaly score:
 {anomaly_result.get("score")}
 
-Create a short critical maintenance notification.
+Recommend immediate machine inspection.
+Write a short critical maintenance notification.
 
-The machine should be inspected immediately.
+
 """
+        title="CRITICAL ALERT"
+
     else:
         prompt = f"""
 Machine ID: {machine_id}
@@ -155,8 +142,7 @@ Severity: WARNING
 
 No specific failure was predicted.
 
-However, an abnormal operating condition
-was detected.
+Anomaly detected: True
 
 Anomaly score:
 {anomaly_result.get("score")}
@@ -164,35 +150,54 @@ Anomaly score:
 Anomaly threshold:
 {anomaly_result.get("threshold")}
 
-Create a short warning maintenance notification.
+Recommend inspecting the unusual operating condition.
+Write a short warning maintenance notification.
 
-The machine should be inspected.
 """
+        title="WARNING ALERT"
 
-    response=agent.invoke({
-        "messages":[
-            {
-                "role":"user",
-                "content":prompt
-            }
-        ]
+
+    response=model.invoke([SystemMessage(content=SYSTEM_PROMPT),
+                        HumanMessage(content=prompt)])
+
+    message=str(response.content).strip()
+
+    if not message:
+        return {
+            "machine_id":machine_id,
+            "severity":severity,
+            "notification_sent":False,
+            "message":"The LLM returned an empty notification."
+        }
+
+    tool_result=send_notification.invoke({
+        "title":title,
+        "message":message
     })
 
+    if tool_result!="Notification sent successfully.":
+        return {
+            "machine_id":machine_id,
+            "severity":severity,
+            "notification_sent":False,
+            "message":str(tool_result),
+            "notification_count":notification_count
+        }
 
     notification_count+=1
 
+    save_state(
+        machine_id=machine_id,
+        severity=severity,
+        failure_type=failure_type,
+        notification_count=notification_count
+    )
 
-    save_state(machine_id=machine_id,
-            severity=severity,
-            failure_type=failure_type,
-            notification_count=notification_count
-            )
 
     return {
         "machine_id":machine_id,
         "severity":severity,
         "notification_sent":True,
-        "notification_count":notification_count,
-        "agent_response":response
+        "agent_response":message,
+        "tool_result":tool_result
     }
-

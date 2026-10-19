@@ -1,5 +1,5 @@
 from notification_agent import process_machine_event
-
+from database.notification_state import reset_state
 prediction_result={
     "TWF":{
         "probability":0.94,
@@ -35,7 +35,7 @@ anomaly_result={
 }
 
 machine_id="test_limit_machine_4"
-
+reset_state(machine_id)
 for i in range(1,5):
     print("\n"+"="*60)
     print(f"NOTIFICATION TEST #{i}")
