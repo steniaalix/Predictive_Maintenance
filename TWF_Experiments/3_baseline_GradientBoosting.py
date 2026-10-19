@@ -1,0 +1,273 @@
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import (
+    train_test_split,
+    GridSearchCV,
+    StratifiedKFold,
+    cross_val_predict
+)
+
+from sklearn.ensemble import GradientBoostingClassifier
+
+from sklearn.metrics import (
+    confusion_matrix,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    average_precision_score
+)
+
+
+
+df=pd.read_csv("data/ai4i2020.csv")
+
+df.drop(columns=["UDI","Product ID"],inplace=True)
+
+df["Power"]=df["Torque [Nm]"]*df["Rotational speed [rpm]"]
+
+
+type_mapping={
+    "L":0,
+    "M":1,
+    "H":2
+}
+
+
+df["Type"]=df["Type"].map(type_mapping)
+
+target="TWF"
+
+failure_columns=[
+    "Machine failure",
+    "TWF",
+    "HDF",
+    "PWF",
+    "OSF",
+    "RNF"
+]
+
+
+X=df.drop(columns=failure_columns)
+
+y=df[target]
+
+
+X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=0.3,random_state=42,stratify=y)
+
+
+negative_count=(y_train==0).sum()
+positive_count=(y_train==1).sum()
+
+
+class_ratio=negative_count/positive_count
+
+
+
+print("=" * 60)
+print("GRADIENT BOOSTING - TWF")
+print("=" * 60)
+
+print("Training samples:", len(X_train))
+print("Test samples:", len(X_test))
+
+print("Negative:", negative_count)
+print("Positive:", positive_count)
+
+print(
+    "Class ratio:",
+    class_ratio
+)
+
+
+sample_weights=np.where(
+    y_train==1,
+    class_ratio,
+    1.0
+
+)
+
+cv=StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
+
+gb=GradientBoostingClassifier(
+    random_state=42
+)
+
+param_grid={
+    "n_estimators":[100,200],
+    "learning_rate":[0.03,0.05,0.1],
+    "max_depth":[2,3],
+    "min_samples_leaf":[1,2],
+    "subsample":[0.8,1.0]
+}
+
+
+
+grid=GridSearchCV(
+    estimator=gb,
+    param_grid=param_grid,
+    scoring="f1",
+    cv=cv,
+    n_jobs=-1,
+    verbose=2
+)
+
+
+grid.fit(
+    X_train,
+    y_train,
+    sample_weight=sample_weights
+)
+
+print("\nBEST PARAMETERS:")
+
+print(grid.best_params_)
+
+print("\nBEST CV F1:",grid.best_score_)
+
+
+best_model=grid.best_estimator_
+
+
+oof_probs=cross_val_predict(
+    best_model,
+    X_train,
+    y_train,
+    cv=cv,
+    method="predict_proba",
+    n_jobs=-1,
+    params={
+        "sample_weight":sample_weights
+    }
+)[:,1]
+
+
+thresholds=np.arange(
+    0.01,
+    1.0,
+    0.01
+)
+
+best_threshold=0.5
+best_f1=-1
+
+for threshold in thresholds:
+    oof_predictions=(oof_probs>=threshold).astype(int)
+
+    f1=f1_score(y_train,oof_predictions,zero_division=0)
+
+    if f1>best_f1:
+        best_f1=f1
+        best_threshold=threshold
+
+
+print(
+    f"\nSELECTED THRESHOLD: "
+    f"{best_threshold:.2f}"
+)
+
+print(
+    "BEST OOF F1:",
+    best_f1
+)
+
+final_model=GradientBoostingClassifier(
+    **grid.best_params_,
+    random_state=42
+)
+
+final_model.fit(
+    X_train,
+    y_train,
+    sample_weight=sample_weights
+)
+
+
+test_probs=final_model.predict_proba(X_test)[:,1]
+
+
+
+test_predictions=(test_probs>=best_threshold).astype(int)
+
+tn,fp,fn,tp=confusion_matrix(y_test,test_predictions,labels=[0,1]).ravel()
+
+
+accuracy = accuracy_score(
+    y_test,
+    test_predictions
+)
+
+precision = precision_score(
+    y_test,
+    test_predictions,
+    zero_division=0
+)
+
+recall = recall_score(
+    y_test,
+    test_predictions,
+    zero_division=0
+)
+
+f1 = f1_score(
+    y_test,
+    test_predictions,
+    zero_division=0
+)
+
+roc_auc = roc_auc_score(
+    y_test,
+    test_probs
+)
+
+pr_auc = average_precision_score(
+    y_test,
+    test_probs
+)
+
+
+
+
+print("\n")
+print("=" * 60)
+print("TEST RESULTS")
+print("=" * 60)
+
+print("TN:", tn)
+print("FP:", fp)
+print("FN:", fn)
+print("TP:", tp)
+
+print(
+    f"\nAccuracy : {accuracy:.4f}"
+)
+
+print(
+    f"Precision: {precision:.4f}"
+)
+
+print(
+    f"Recall   : {recall:.4f}"
+)
+
+print(
+    f"F1       : {f1:.4f}"
+)
+
+print(
+    f"ROC-AUC  : {roc_auc:.4f}"
+)
+
+print(
+    f"PR-AUC   : {pr_auc:.4f}"
+)
+
+print(
+    f"Threshold: {best_threshold:.2f}"
+)
